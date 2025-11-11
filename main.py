@@ -16,7 +16,7 @@ from smartcard.System import readers
 
 app = FastAPI()
 
-WEBHOOK_URL = os.getenv("NFC_WEBHOOK_URL")+"/reader/uid-catcher"
+WEBHOOK_URL = os.getenv("NFC_WEBHOOK_URL")+"/reader/read-event"
 reader_status = {"connected": False, "ready": False}
 
 # Cola de eventos
@@ -120,7 +120,6 @@ def read_pages_from_reader(reader_name, start_page, num_pages):
             return bytes(data_bytes)
     raise RuntimeError(f"Lector '{reader_name}' no encontrado")
 
-# --- helper: escribir credential_id en páginas de usuario (páginas 4..39)
 def write_credential_to_tag(reader_name: str, credential_id: str, start_page: int = 4):
     """
     Escribe credential_id (utf-8) en páginas de usuario del NTAG213 (4..39).
@@ -134,18 +133,15 @@ def write_credential_to_tag(reader_name: str, credential_id: str, start_page: in
     if len(payload) > max_bytes:
         return False, f"credential_id demasiado largo ({len(payload)} bytes), max {max_bytes}"
 
-    # Rellenar a múltiplo de 4
     padded_len = math.ceil(len(payload) / 4) * 4
     padded = payload.ljust(padded_len, b"\x00")
 
-    # Encontrar lector y conectarse
     for r in pcsc_readers():
         if str(r) == reader_name:
             try:
                 conn = r.createConnection()
                 conn.connect()
 
-                # Escribir 4 bytes por página usando APDU FF D6 00 <page> 04 <4 bytes>
                 page = start_page
                 for i in range(0, len(padded), 4):
                     chunk = list(padded[i:i+4])
@@ -167,7 +163,6 @@ def write_credential_to_tag(reader_name: str, credential_id: str, start_page: in
 
     return False, f"Lector '{reader_name}' no encontrado"
 
-# --- En sender(), reemplaza el bloque donde tenías la 'simulación' por algo así:
 async def sender():
     global pending_assign
 
@@ -243,4 +238,4 @@ async def status():
     return reader_status
 
 if __name__ == "__main__":
-    uvicorn.run("main_webhook:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main_webhook:app", host="0.0.0.0", port=9000, reload=True)
