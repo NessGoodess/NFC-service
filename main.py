@@ -8,11 +8,19 @@ import os
 from fastapi import FastAPI, Request, HTTPException
 import uvicorn
 import httpx
+from dotenv import load_dotenv
 
+load_dotenv()
 
 from smartcard.CardMonitoring import CardMonitor, CardObserver
 from smartcard.util import toHexString
 from smartcard.System import readers
+
+TOKEN = os.getenv("NFC_SERVICE_TOKEN")
+headers = {
+    "Authorization": f"Bearer {TOKEN}",
+    "Content-Type": "application/json",
+}
 
 app = FastAPI()
 
@@ -198,7 +206,7 @@ async def sender():
                         # Intentar enviar resultado al webhook (con reintentos simples)
                         for attempt in range(3):
                             try:
-                                await client.post(WEBHOOK_URL, json=payload)
+                                await client.post(WEBHOOK_URL, json=payload, headers=headers)
                                 break
                             except Exception as e:
                                 print(f"⚠️ Error enviando webhook (intento {attempt+1}): {e}")
@@ -208,7 +216,7 @@ async def sender():
 
                 # Enviar también el evento crudo al webhook (opcional)
                 try:
-                    await client.post(WEBHOOK_URL, json=event)
+                    await client.post(WEBHOOK_URL, json=event, headers=headers)
                 except Exception as e:
                     print(f"⚠️ No se pudo enviar evento crudo al webhook: {e}")
 
