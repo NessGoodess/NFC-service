@@ -24,12 +24,16 @@ headers = {
 
 app = FastAPI()
 
-WEBHOOK_URL = os.getenv("NFC_WEBHOOK_URL")+"/reader/read-event"
-reader_status = {"connected": False, "ready": False}
+WEBHOOK_BASE = (os.getenv("NFC_WEBHOOK_URL") or "").rstrip("/")
+WEBHOOK_URL = f"{WEBHOOK_BASE}/reader/read-event" if WEBHOOK_BASE else ""
+READER_POLL_INTERVAL = int(os.getenv("NFC_READER_POLL_INTERVAL", "5"))
+reader_status = {"connected": False, "ready": False, "readers": []}
 
 # Cola de eventos
 event_queue: asyncio.Queue = asyncio.Queue()
 pending_assign: dict | None = None
+card_monitor: CardMonitor | None = None
+
 
 class WebhookObserver(CardObserver):
     def __init__(self, loop: asyncio.AbstractEventLoop, queue: asyncio.Queue):
@@ -86,29 +90,130 @@ class WebhookObserver(CardObserver):
 
         return uid, credential_id
 
+webhook_observer: WebhookObserver | None = None
+
+def _reader_names():
+    """Lista de nombres de lectores actualmente disponibles (thread-safe para polling)."""
+    try:
+        return [str(r) for r in readers()]
+    except Exception:
+        return []
+
+
+def _start_card_monitor(loop: asyncio.AbstractEventLoop) -> bool:
+    """Inicia o reinicia el CardMonitor. Devuelve True si hay lectores y se inició."""
+    global card_monitor, webhook_observer
+    try:
+        if card_monitor is not None and webhook_observer is not None:
+            try:
+                card_monitor.deleteObserver(webhook_observer)
+            except Exception:
+                pass
+            card_monitor = None
+            webhook_observer = None
+        available = _reader_names()
+        if not available:
+            reader_status["connected"] = False
+            reader_status["ready"] = False
+            reader_status["readers"] = []
+            return False
+        card_monitor = CardMonitor()
+        webhook_observer = WebhookObserver(loop, event_queue)
+        card_monitor.addObserver(webhook_observer)
+        reader_status["connected"] = True
+        reader_status["ready"] = True
+        reader_status["readers"] = available
+        return True
+    except Exception as e:
+        print(f"Error iniciando CardMonitor: {e}")
+        reader_status["connected"] = bool(_reader_names())
+        reader_status["ready"] = False
+        reader_status["readers"] = _reader_names()
+        return False
+
+
+async def _reader_status_poller():
+    """Comprueba periódicamente si el lector sigue conectado; reconecta y notifica al backend."""
+    global card_monitor, webhook_observer
+    last_connected: bool = reader_status["connected"]
+    last_readers: tuple = tuple(reader_status["readers"])
+    async with httpx.AsyncClient(timeout=10) as client:
+        while True:
+            await asyncio.sleep(READER_POLL_INTERVAL)
+            current_readers = tuple(_reader_names())
+            connected = len(current_readers) > 0
+            if connected != last_connected or current_readers != last_readers:
+                reader_status["connected"] = connected
+                reader_status["readers"] = list(current_readers)
+                if connected:
+                    loop = asyncio.get_running_loop()
+                    if _start_card_monitor(loop):
+                        reader_status["ready"] = True
+                        print("🟢 Lector(es) reconectado(s):", current_readers)
+                    else:
+                        reader_status["ready"] = False
+                else:
+                    reader_status["ready"] = False
+                    if card_monitor and webhook_observer:
+                        try:
+                            card_monitor.deleteObserver(webhook_observer)
+                        except Exception:
+                            pass
+                    card_monitor = None
+                    webhook_observer = None
+                    print("🔴 Lector NFC desconectado")
+                payload = {
+                    "event": "reader_status_changed",
+                    "connected": reader_status["connected"],
+                    "ready": reader_status["ready"],
+                    "readers": reader_status["readers"],
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                }
+                if WEBHOOK_URL:
+                    for attempt in range(3):
+                        try:
+                            await client.post(WEBHOOK_URL, json=payload, headers=headers)
+                            break
+                        except Exception as e:
+                            print(f"Error enviando estado del lector (intento {attempt+1}): {e}")
+                            await asyncio.sleep(2 ** attempt)
+                last_connected = connected
+                last_readers = current_readers
+
+
 @app.on_event("startup")
 async def startup():
-    # Obtenemos loop principal
     loop = asyncio.get_running_loop()
-
-    # Iniciamos CardMonitor con observer
     try:
-        available_readers = readers()
-        if not available_readers:
+        available = _reader_names()
+        if not available:
             reader_status["connected"] = False
-            return
+            reader_status["ready"] = False
+            reader_status["readers"] = []
         else:
-            reader_status["connected"] = True
+            _start_card_monitor(loop)
     except Exception:
         reader_status["connected"] = False
-        return
-    
-    cm = CardMonitor()
-    observer = WebhookObserver(loop, event_queue)
-    cm.addObserver(observer)
-    reader_status["ready"] = True
+        reader_status["ready"] = False
+        reader_status["readers"] = []
 
     asyncio.create_task(sender())
+    asyncio.create_task(_reader_status_poller())
+
+    # Enviar estado inicial al backend para sincronizar el frontend
+    if WEBHOOK_URL:
+        initial_payload = {
+            "event": "reader_status_changed",
+            "connected": reader_status["connected"],
+            "ready": reader_status["ready"],
+            "readers": reader_status["readers"],
+        }
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                await client.post(WEBHOOK_URL, json=initial_payload, headers=headers)
+                print(f"📡 Estado inicial enviado: connected={reader_status['connected']}")
+        except Exception as e:
+            print(f"No se pudo enviar estado inicial: {e}")
 
     # Tarea que consume la cola y envía webhook
 # --- helper: leer páginas (4 bytes cada página) usando APDU PC/SC
@@ -183,7 +288,7 @@ async def sender():
                 if event["event"] == "card_inserted":
                     uid = event.get("uid")
                     reader_name = event.get("reader")
-                    print(f"📶 Tarjeta insertada: {uid} en {reader_name}")
+                    print(f"Tarjeta insertada: {uid} en {reader_name}")
 
                     if pending_assign and pending_assign.get("action") == "assign":
                         credential_id = pending_assign["credential_id"]
@@ -199,9 +304,9 @@ async def sender():
                         }
 
                         if success:
-                            print(f"✅ {msg}")
+                            print(f"{msg}")
                         else:
-                            print(f"❌ Falló la escritura: {msg}")
+                            print(f"Falló la escritura: {msg}")
 
                         # Intentar enviar resultado al webhook (con reintentos simples)
                         for attempt in range(3):
@@ -209,7 +314,7 @@ async def sender():
                                 await client.post(WEBHOOK_URL, json=payload, headers=headers)
                                 break
                             except Exception as e:
-                                print(f"⚠️ Error enviando webhook (intento {attempt+1}): {e}")
+                                print(f"Error enviando webhook (intento {attempt+1}): {e}")
                                 await asyncio.sleep(2 ** attempt)
 
                         pending_assign = None
@@ -218,10 +323,10 @@ async def sender():
                 try:
                     await client.post(WEBHOOK_URL, json=event, headers=headers)
                 except Exception as e:
-                    print(f"⚠️ No se pudo enviar evento crudo al webhook: {e}")
+                    print(f"No se pudo enviar evento crudo al webhook: {e}")
 
             except Exception as e:
-                print(f"❌ Error en sender(): {e}")
+                print(f"Error en sender(): {e}")
                 await asyncio.sleep(1)
 @app.post("/assign-nfc")
 async def assign_nfc(request: Request):
@@ -233,7 +338,7 @@ async def assign_nfc(request: Request):
         raise HTTPException(status_code=400, detail="credential_id is required")
 
     pending_assign = {"credential_id": credential_id, "action": "assign"}
-    print(f"📦 Nueva tarea pendiente: asignar credential_id {credential_id}")
+    print(f"Nueva tarea pendiente: asignar credential_id {credential_id}")
 
     return {"success": True, "message": f"Esperando tarjeta para credencial {credential_id}"}
 
@@ -246,4 +351,4 @@ async def status():
     return reader_status
 
 if __name__ == "__main__":
-    uvicorn.run("main_webhook:app", host="0.0.0.0", port=9000, reload=True)
+    uvicorn.run("reader:app", host="0.0.0.0", port=9000, reload=True)
