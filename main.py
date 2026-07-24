@@ -12,6 +12,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from config import get_reader_poll_interval, get_webhook_concurrency
+from event_outbox import EventOutbox
+from slot_registry import slot_registry
+
 from smartcard.CardMonitoring import CardMonitor, CardObserver
 from smartcard.util import toHexString
 from smartcard.System import readers
@@ -24,13 +28,16 @@ headers = {
 
 app = FastAPI()
 
-WEBHOOK_BASE = (os.getenv("NFC_WEBHOOK_URL") or "").rstrip("/")
+WEBHOOK_BASE = (os.getenv("NFC_WEBHOOK_URL") or "").strip().strip('"').rstrip("/")
 WEBHOOK_URL = f"{WEBHOOK_BASE}/reader/read-event" if WEBHOOK_BASE else ""
-READER_POLL_INTERVAL = int(os.getenv("NFC_READER_POLL_INTERVAL", "5"))
+READER_POLL_INTERVAL = get_reader_poll_interval()
+WEBHOOK_CONCURRENCY = get_webhook_concurrency()
 reader_status = {"connected": False, "ready": False, "readers": []}
 
-# Cola de eventos
+# Cola de eventos (memoria → outbox SQLite → backend)
 event_queue: asyncio.Queue = asyncio.Queue()
+outbox = EventOutbox()
+webhook_semaphore: asyncio.Semaphore | None = None
 pending_assign: dict | None = None
 card_monitor: CardMonitor | None = None
 
@@ -56,12 +63,14 @@ class WebhookObserver(CardObserver):
                 "uid": uid,
                 "credential_id": credential_id
             }
+            event = slot_registry.enrich_event(event)
             # Enviamos al loop principal de asyncio de forma thread-safe
             self.loop.call_soon_threadsafe(self.queue.put_nowait, event)
 
         for card in removed_cards:
             print(f"Tarjeta removida del lector {card.reader}")
             event = {"event": "card_removed", "reader": str(card.reader)}
+            event = slot_registry.enrich_event(event)
             self.loop.call_soon_threadsafe(self.queue.put_nowait, event)
 
     def _read_uid_from_card(self, card):
@@ -92,10 +101,18 @@ class WebhookObserver(CardObserver):
 
 webhook_observer: WebhookObserver | None = None
 
+def _is_nfc_reader(name: str) -> bool:
+    """ACR devices expose PICC (NFC) and SAM; only PICC reads student cards."""
+    upper = name.upper()
+    if " SAM " in upper or upper.endswith(" SAM 0"):
+        return False
+    return True
+
+
 def _reader_names():
-    """Lista de nombres de lectores actualmente disponibles (thread-safe para polling)."""
+    """Lista de nombres de lectores NFC disponibles (thread-safe para polling)."""
     try:
-        return [str(r) for r in readers()]
+        return [str(r) for r in readers() if _is_nfc_reader(str(r))]
     except Exception:
         return []
 
@@ -149,7 +166,7 @@ async def _reader_status_poller():
                     loop = asyncio.get_running_loop()
                     if _start_card_monitor(loop):
                         reader_status["ready"] = True
-                        print("🟢 Lector(es) reconectado(s):", current_readers)
+                        print("[OK] Lector(es) reconectado(s):", current_readers)
                     else:
                         reader_status["ready"] = False
                 else:
@@ -161,7 +178,7 @@ async def _reader_status_poller():
                             pass
                     card_monitor = None
                     webhook_observer = None
-                    print("🔴 Lector NFC desconectado")
+                    print("[WARN] Lector NFC desconectado")
                 payload = {
                     "event": "reader_status_changed",
                     "connected": reader_status["connected"],
@@ -183,6 +200,13 @@ async def _reader_status_poller():
 
 @app.on_event("startup")
 async def startup():
+    global webhook_semaphore
+    webhook_semaphore = asyncio.Semaphore(WEBHOOK_CONCURRENCY)
+    slot_registry.reload()
+    pruned = outbox.prune_sent(retention_days=7)
+    if pruned:
+        print(f"[OK] Outbox: eliminados {pruned} eventos confirmados antiguos")
+
     loop = asyncio.get_running_loop()
     try:
         available = _reader_names()
@@ -198,6 +222,7 @@ async def startup():
         reader_status["readers"] = []
 
     asyncio.create_task(sender())
+    asyncio.create_task(_outbox_flusher())
     asyncio.create_task(_reader_status_poller())
 
     # Enviar estado inicial al backend para sincronizar el frontend
@@ -211,11 +236,10 @@ async def startup():
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 await client.post(WEBHOOK_URL, json=initial_payload, headers=headers)
-                print(f"📡 Estado inicial enviado: connected={reader_status['connected']}")
+                print(f"[OK] Estado inicial enviado: connected={reader_status['connected']}")
         except Exception as e:
             print(f"No se pudo enviar estado inicial: {e}")
 
-    # Tarea que consume la cola y envía webhook
 # --- helper: leer páginas (4 bytes cada página) usando APDU PC/SC
 def read_pages_from_reader(reader_name, start_page, num_pages):
     for r in pcsc_readers():
@@ -276,58 +300,111 @@ def write_credential_to_tag(reader_name: str, credential_id: str, start_page: in
 
     return False, f"Lector '{reader_name}' no encontrado"
 
+
+async def _post_webhook(client: httpx.AsyncClient, payload: dict, retries: int = 3) -> bool:
+    """POST webhook. Returns True on HTTP 2xx (incl. 202 accepted)."""
+    if not WEBHOOK_URL:
+        return False
+    assert webhook_semaphore is not None
+    async with webhook_semaphore:
+        for attempt in range(retries):
+            try:
+                response = await client.post(WEBHOOK_URL, json=payload, headers=headers)
+                if response.status_code >= 400:
+                    print(
+                        f"[WARN] Webhook HTTP {response.status_code} "
+                        f"(intento {attempt + 1}): {response.text[:200]}"
+                    )
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                print(
+                    f"[OK] Webhook {payload.get('event')} "
+                    f"cred={payload.get('credential_id')} slot={payload.get('reader_slot_code')} "
+                    f"-> HTTP {response.status_code}"
+                )
+                return True
+            except Exception as e:
+                print(f"[ERR] Webhook (intento {attempt + 1}): {e}")
+                await asyncio.sleep(2 ** attempt)
+    return False
+
+
+async def _outbox_flusher():
+    """Drain SQLite outbox to Laravel (durable retries across restarts)."""
+    async with httpx.AsyncClient(timeout=10) as client:
+        print("[OK] Outbox SQLite flusher iniciado")
+        while True:
+            try:
+                pending = outbox.fetch_pending(limit=WEBHOOK_CONCURRENCY * 2)
+                if not pending:
+                    await asyncio.sleep(1)
+                    continue
+
+                for item in pending:
+                    ok = await _post_webhook(client, item["payload"], retries=2)
+                    if ok:
+                        outbox.mark_sent(item["id"])
+                    else:
+                        outbox.mark_failed_attempt(
+                            item["id"],
+                            f"delivery failed after attempts={item['attempts'] + 1}",
+                        )
+                        await asyncio.sleep(min(2 ** min(item["attempts"], 5), 30))
+                await asyncio.sleep(0.15)
+            except Exception as e:
+                print(f"[ERR] outbox_flusher(): {e}")
+                await asyncio.sleep(2)
+
+
 async def sender():
     global pending_assign
 
-    async with httpx.AsyncClient(timeout=10) as client:
-        print("🟢 Sender NFC iniciado. Esperando tarjetas...")
-        while True:
-            try:
-                event = await event_queue.get()
+    print("[OK] Sender NFC iniciado. Esperando tarjetas...")
+    while True:
+        try:
+            event = await event_queue.get()
+            event = slot_registry.enrich_event(event)
+            print(
+                f"[QUEUE] event={event.get('event')} "
+                f"slot={event.get('reader_slot_code')} cred={event.get('credential_id')}"
+            )
 
-                if event["event"] == "card_inserted":
-                    uid = event.get("uid")
-                    reader_name = event.get("reader")
-                    print(f"Tarjeta insertada: {uid} en {reader_name}")
+            if event["event"] == "card_inserted":
+                uid = event.get("uid")
+                reader_name = event.get("reader")
+                print(f"Tarjeta insertada: {uid} en {reader_name}")
 
-                    if pending_assign and pending_assign.get("action") == "assign":
-                        credential_id = pending_assign["credential_id"]
+                if pending_assign and pending_assign.get("action") == "assign":
+                    credential_id = pending_assign["credential_id"]
+                    success, msg = write_credential_to_tag(reader_name, credential_id)
+                    assign_payload = {
+                        "event": "nfc_assigned",
+                        "credential_id": credential_id,
+                        "uid": uid,
+                        "success": success,
+                        "message": msg,
+                    }
+                    if success:
+                        print(f"{msg}")
+                    else:
+                        print(f"Fallo la escritura: {msg}")
+                    # Assign feedback is best-effort (not durable attendance).
+                    async with httpx.AsyncClient(timeout=10) as client:
+                        await _post_webhook(client, assign_payload)
+                    pending_assign = None
 
-                        # Escribir en la tarjeta (real)
-                        success, msg = write_credential_to_tag(reader_name, credential_id)
-                        payload = {
-                            "event": "nfc_assigned",
-                            "credential_id": credential_id,
-                            "uid": uid,
-                            "success": success,
-                            "message": msg
-                        }
+                # Persist card reads so Pi restarts do not lose them.
+                event_id = outbox.enqueue(event)
+                print(f"[OUTBOX] enqueued client_event_id={event_id}")
+                continue
 
-                        if success:
-                            print(f"{msg}")
-                        else:
-                            print(f"Falló la escritura: {msg}")
+            # Status / removed: direct post (no attendance side effects).
+            async with httpx.AsyncClient(timeout=10) as client:
+                await _post_webhook(client, event)
 
-                        # Intentar enviar resultado al webhook (con reintentos simples)
-                        for attempt in range(3):
-                            try:
-                                await client.post(WEBHOOK_URL, json=payload, headers=headers)
-                                break
-                            except Exception as e:
-                                print(f"Error enviando webhook (intento {attempt+1}): {e}")
-                                await asyncio.sleep(2 ** attempt)
-
-                        pending_assign = None
-
-                # Enviar también el evento crudo al webhook (opcional)
-                try:
-                    await client.post(WEBHOOK_URL, json=event, headers=headers)
-                except Exception as e:
-                    print(f"No se pudo enviar evento crudo al webhook: {e}")
-
-            except Exception as e:
-                print(f"Error en sender(): {e}")
-                await asyncio.sleep(1)
+        except Exception as e:
+            print(f"[ERR] sender(): {e}")
+            await asyncio.sleep(1)
 @app.post("/assign-nfc")
 async def assign_nfc(request: Request):
     global pending_assign
@@ -348,7 +425,14 @@ async def root():
 
 @app.get("/status")
 async def status():
-    return reader_status
+    return {
+        **reader_status,
+        "webhook_concurrency": WEBHOOK_CONCURRENCY,
+        "workers": 1,
+        "queue_size": event_queue.qsize(),
+        "outbox_pending": outbox.pending_count(),
+    }
+
 
 if __name__ == "__main__":
-    uvicorn.run("reader:app", host="0.0.0.0", port=9000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=9000, reload=False, workers=1)

@@ -1,0 +1,29 @@
+{
+  "global_armed": true,
+  "webhook_concurrency": 3,
+  "reader_poll_interval_seconds": 8,
+  "slots": [
+    {
+      "code": "boys-entry",
+      "pcsc_name": "ACS ACR1252 1S CL Reader PICC 0",
+      "label": "Niños - Entrada"
+    },
+    {
+      "code": "girls-entry",
+      "pcsc_name": "ACS ACR1252 1S CL Reader PICC 1",
+      "label": "Niñas - Entrada"
+    },
+    {
+      "code": "boys-exit",
+      "pcsc_name": null,
+      "label": "Niños - Salida",
+      "active": false
+    },
+    {
+      "code": "girls-exit",
+      "pcsc_name": null,
+      "label": "Niñas - Salida",
+      "active": false
+    }
+  ]
+}
