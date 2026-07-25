@@ -1,4 +1,6 @@
-"""SQLite outbox for durable NFC webhook delivery (Phase 2)."""
+"""SQLite outbox for durable NFC webhook delivery.
+#es: Outbox SQLite para entrega durable de webhooks NFC.
+"""
 
 from __future__ import annotations
 
@@ -9,18 +11,24 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from config import BASE_DIR
+from app.core.config import DATA_DIR
 
-DEFAULT_DB_PATH = Path(os.getenv("NFC_OUTBOX_DB", str(BASE_DIR / "nfc_outbox.db")))
+DEFAULT_DB_PATH = Path(os.getenv("NFC_OUTBOX_DB", str(DATA_DIR / "nfc_outbox.db")))
 
-# EventOutbox is a class that manages the outbox for durable NFC webhook delivery.
-# Español: EventOutbox es una clase que gestiona el outbox para la entrega durable de webhooks NFC.
+
 class EventOutbox:
+    """Persist events before webhook delivery so restarts do not drop them.
+    #es: Persiste eventos antes del webhook para que un reinicio no los pierda.
+    """
+
     def __init__(self, db_path: Path | str | None = None) -> None:
         self.db_path = Path(db_path or DEFAULT_DB_PATH)
         self._ensure_schema()
 
     def _connect(self) -> sqlite3.Connection:
+        """Open a SQLite connection with WAL-friendly pragmas.
+        #es: Abre una conexión SQLite con pragmas aptos para WAL.
+        """
         conn = sqlite3.connect(self.db_path, timeout=30)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout = 30000")
@@ -29,6 +37,9 @@ class EventOutbox:
         return conn
 
     def _ensure_schema(self) -> None:
+        """Create outbox table and status index if missing.
+        #es: Crea la tabla outbox y el índice de estado si no existen.
+        """
         with self._connect() as conn:
             conn.execute(
                 """
@@ -50,6 +61,9 @@ class EventOutbox:
             conn.commit()
 
     def enqueue(self, payload: dict[str, Any], client_event_id: str | None = None) -> str:
+        """Insert a pending event and return its client_event_id.
+        #es: Inserta un evento pendiente y devuelve su client_event_id.
+        """
         event_id = client_event_id or str(uuid.uuid4())
         body = dict(payload)
         body["client_event_id"] = event_id
@@ -66,6 +80,9 @@ class EventOutbox:
         return event_id
 
     def fetch_pending(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Fetch oldest pending rows for delivery.
+        #es: Obtiene las filas pendientes más antiguas para entregarlas.
+        """
         with self._connect() as conn:
             rows = conn.execute(
                 """
@@ -89,6 +106,9 @@ class EventOutbox:
         ]
 
     def mark_sent(self, row_id: int) -> None:
+        """Mark a row as successfully delivered.
+        #es: Marca una fila como entregada correctamente.
+        """
         with self._connect() as conn:
             conn.execute(
                 """
@@ -101,6 +121,9 @@ class EventOutbox:
             conn.commit()
 
     def mark_failed_attempt(self, row_id: int, error: str) -> None:
+        """Increment attempts and store the last delivery error.
+        #es: Incrementa intentos y guarda el último error de entrega.
+        """
         with self._connect() as conn:
             conn.execute(
                 """
@@ -113,6 +136,9 @@ class EventOutbox:
             conn.commit()
 
     def pending_count(self) -> int:
+        """Count pending outbox rows.
+        #es: Cuenta filas pendientes del outbox.
+        """
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT COUNT(*) AS c FROM outbox WHERE status = 'pending'"
@@ -120,7 +146,9 @@ class EventOutbox:
             return int(row["c"] if row else 0)
 
     def prune_sent(self, retention_days: int = 7) -> int:
-        """Remove acknowledged events after a short diagnostic retention period."""
+        """Delete acknowledged events older than the retention window.
+        #es: Elimina eventos confirmados más antiguos que la ventana de retención.
+        """
         with self._connect() as conn:
             cursor = conn.execute(
                 """

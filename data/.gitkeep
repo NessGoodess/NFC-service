@@ -1,0 +1,2 @@
+# Runtime data (SQLite outbox, etc.). Keep this directory in git; ignore *.db.
+#es: Datos en runtime (outbox SQLite, etc.). Mantener el directorio en git; ignorar *.db.

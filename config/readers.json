@@ -1,0 +1,29 @@
+{
+  "global_armed": true,
+  "webhook_concurrency": 3,
+  "reader_poll_interval_seconds": 8,
+  "slots": [
+    {
+      "code": "entry-a",
+      "pcsc_name": null,
+      "label": "Entry A"
+    },
+    {
+      "code": "entry-b",
+      "pcsc_name": null,
+      "label": "Entry B"
+    },
+    {
+      "code": "exit-a",
+      "pcsc_name": null,
+      "label": "Exit A",
+      "active": false
+    },
+    {
+      "code": "exit-b",
+      "pcsc_name": null,
+      "label": "Exit B",
+      "active": false
+    }
+  ]
+}

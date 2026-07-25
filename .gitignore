@@ -1,9 +1,13 @@
-.env
+config/.env
 .venv/
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+data/*.db
+data/*.db-journal
 nfc_outbox.db
 *.db
 *.db-journal
+*.db-shm
+*.db-wal
