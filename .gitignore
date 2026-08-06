@@ -11,3 +11,4 @@ nfc_outbox.db
 *.db-journal
 *.db-shm
 *.db-wal
+SYSTEMD_CONFIG.txt

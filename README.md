@@ -20,8 +20,9 @@ NFC-Reader/
 │   └── readers.json       # logical slots ↔ PC/SC names
 ├── data/                  # SQLite outbox (runtime)
 ├── scripts/
-│   ├── install_pi.sh      # deps + venv + systemd unit
-│   └── run_pi.sh          # service entrypoint
+│   ├── install_pcsc_deps.sh  # apt PC/SC + Python build deps (optional if done manually)
+│   ├── install_pi.sh         # calls deps (unless skipped) + venv + systemd unit
+│   └── run_pi.sh             # service entrypoint
 ├── SYSTEMD_CONFIG.txt     # site-specific deploy notes
 └── requirements.txt
 ```
@@ -44,7 +45,14 @@ Start: `uvicorn app.main:app` or `python -m app.main`.
 git clone <REPO_URL> ~/NFC-Reader
 cd ~/NFC-Reader
 chmod +x scripts/*.sh
+
+# Option A — all-in-one (installs system deps, then venv + systemd):
 ./scripts/install_pi.sh
+
+# Option B — system deps first (or install packages by hand), then service only:
+# ./scripts/install_pcsc_deps.sh
+# SKIP_PCSC_DEPS=1 ./scripts/install_pi.sh
+
 nano config/.env
 # review config/readers.json
 sudo systemctl start nfc-reader
@@ -57,7 +65,7 @@ Site-specific hardware, tokens, and host details: see `SYSTEMD_CONFIG.txt`.
 
 1. Copy `config/.env.example` → `config/.env` (service token + backend URL).
 2. Edit `config/readers.json` with logical slots for your readers.
-3. On first start, a reader without `pcsc_name` can auto-bind to the first free active slot (pairing mode).
+3. Pairing is done in the Laravel admin UI (Lectores). Keep `pcsc_name` null in `readers.json` unless you want a local hint only — the API is the source of truth.
 
 Useful env vars (`config/.env`):
 

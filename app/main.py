@@ -44,6 +44,11 @@ async def startup():
             state.reader_status["readers"] = []
         else:
             start_card_monitor(loop)
+            # Ensure initial webhook lists PC/SC names for the config dropdown.
+            #es: Asegura que el webhook inicial liste nombres PC/SC para el dropdown.
+            if not state.reader_status.get("readers"):
+                state.reader_status["readers"] = available
+                state.reader_status["connected"] = True
     except Exception:
         state.reader_status["connected"] = False
         state.reader_status["ready"] = False

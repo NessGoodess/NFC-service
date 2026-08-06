@@ -14,6 +14,30 @@ from app.hardware.monitor import start_card_monitor
 from app.hardware.pcsc import reader_names
 from app import state
 
+# Re-push status even without USB changes so Laravel cache / UI select stay fresh.
+#es: Reenvía status aunque no cambie el USB para que la caché Laravel / select de UI se mantengan.
+HEARTBEAT_EVERY_POLLS = max(2, int(30 / max(READER_POLL_INTERVAL, 1)))
+
+
+async def _post_status(client: httpx.AsyncClient, reason: str) -> None:
+    payload = {
+        "event": "reader_status_changed",
+        "connected": state.reader_status["connected"],
+        "ready": state.reader_status["ready"],
+        "readers": state.reader_status["readers"],
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "reason": reason,
+    }
+    if not WEBHOOK_URL:
+        return
+    for attempt in range(3):
+        try:
+            await client.post(WEBHOOK_URL, json=payload, headers=HEADERS)
+            return
+        except Exception as e:
+            print(f"Error sending reader status (attempt {attempt + 1}): {e}")
+            await asyncio.sleep(2 ** attempt)
+
 
 async def reader_status_poller():
     """Watch reader connect/disconnect, restart monitoring, and notify the backend.
@@ -21,12 +45,17 @@ async def reader_status_poller():
     """
     last_connected: bool = state.reader_status["connected"]
     last_readers: tuple = tuple(state.reader_status["readers"])
+    polls_since_push = 0
+
     async with httpx.AsyncClient(timeout=10) as client:
         while True:
             await asyncio.sleep(READER_POLL_INTERVAL)
             current_readers = tuple(reader_names())
             connected = len(current_readers) > 0
-            if connected != last_connected or current_readers != last_readers:
+            changed = connected != last_connected or current_readers != last_readers
+            polls_since_push += 1
+
+            if changed:
                 state.reader_status["connected"] = connected
                 state.reader_status["readers"] = list(current_readers)
                 if connected:
@@ -46,20 +75,15 @@ async def reader_status_poller():
                     state.card_monitor = None
                     state.webhook_observer = None
                     print("[WARN] NFC reader disconnected")
-                payload = {
-                    "event": "reader_status_changed",
-                    "connected": state.reader_status["connected"],
-                    "ready": state.reader_status["ready"],
-                    "readers": state.reader_status["readers"],
-                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                }
-                if WEBHOOK_URL:
-                    for attempt in range(3):
-                        try:
-                            await client.post(WEBHOOK_URL, json=payload, headers=HEADERS)
-                            break
-                        except Exception as e:
-                            print(f"Error sending reader status (attempt {attempt + 1}): {e}")
-                            await asyncio.sleep(2 ** attempt)
+
+                await _post_status(client, "change")
                 last_connected = connected
                 last_readers = current_readers
+                polls_since_push = 0
+            elif polls_since_push >= HEARTBEAT_EVERY_POLLS:
+                # Keep Laravel connected_pcsc in sync for the config dropdown.
+                #es: Mantiene connected_pcsc de Laravel al día para el dropdown de config.
+                state.reader_status["readers"] = list(current_readers)
+                state.reader_status["connected"] = connected
+                await _post_status(client, "heartbeat")
+                polls_since_push = 0

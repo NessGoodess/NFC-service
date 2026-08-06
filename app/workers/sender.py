@@ -9,7 +9,6 @@ import asyncio
 import httpx
 
 from app.hardware.card_writer import write_credential_to_tag
-from app.services.slots import slot_registry
 from app.services.webhook import post_webhook
 from app import state
 
@@ -21,8 +20,9 @@ async def sender():
     print("[OK] NFC sender started. Waiting for cards...")
     while True:
         try:
+            # Events are already enriched in the card monitor.
+            #es: Los eventos ya vienen enriquecidos desde el monitor de tarjetas.
             event = await state.event_queue.get()
-            event = slot_registry.enrich_event(event)
             print(
                 f"[QUEUE] event={event.get('event')} "
                 f"slot={event.get('reader_slot_code')} cred={event.get('credential_id')}"
