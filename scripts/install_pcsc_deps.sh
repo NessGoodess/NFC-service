@@ -7,7 +7,7 @@
 #
 # Manual equivalent / equivalente manual:
 #   sudo apt-get update
-#   sudo apt-get install -y git libccid libpcsclite-dev pcscd python3-dev python3-venv
+#   sudo apt-get install -y git build-essential swig libccid libpcsclite-dev pcscd python3-dev python3-venv
 #   sudo systemctl enable --now pcscd
 
 set -euo pipefail
@@ -17,6 +17,8 @@ echo "=== Instalando dependencias de sistema PC/SC ==="
 
 PACKAGES=(
   git
+  build-essential
+  swig
   libccid
   libpcsclite-dev
   pcscd
