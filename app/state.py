@@ -23,8 +23,5 @@ reader_status: dict[str, Any] = {"connected": False, "ready": False, "readers": 
 event_queue: asyncio.Queue = asyncio.Queue()
 outbox = EventOutbox()
 webhook_semaphore: asyncio.Semaphore | None = None
-# Next credential write request waiting for a card tap.
-#es: Siguiente escritura de credencial pendiente de un toque de tarjeta.
-pending_assign: dict | None = None
 card_monitor: CardMonitor | None = None
 webhook_observer: WebhookObserver | None = None

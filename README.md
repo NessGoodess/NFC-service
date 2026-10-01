@@ -86,4 +86,3 @@ NFC_READER_POLL_INTERVAL=8
 
 - `GET /` — health / configured webhook URL
 - `GET /status` — readers, in-memory queue, outbox pending count
-- `POST /assign-nfc` — write a credential onto the next tapped card

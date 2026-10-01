@@ -4,17 +4,20 @@
 
 from __future__ import annotations
 
+import re
+
 from smartcard.System import readers
+
+# ACR1252: "... Dual Reader SAM] 01 00" — SAM is a word, not always " SAM ".
+# ACR122U: "... SAM Interface 0"
+_SAM_INTERFACE = re.compile(r"\bSAM\b", re.IGNORECASE)
 
 
 def is_nfc_reader(name: str) -> bool:
     """Return True for contactless (PICC) interfaces; ignore SAM interfaces.
     #es: True para interfaces contactless (PICC); ignora interfaces SAM.
     """
-    upper = name.upper()
-    if " SAM " in upper or upper.endswith(" SAM 0"):
-        return False
-    return True
+    return _SAM_INTERFACE.search(name) is None
 
 
 def reader_names() -> list[str]:

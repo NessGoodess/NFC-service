@@ -1,32 +1,15 @@
-"""Local FastAPI HTTP endpoints for health, status, and credential assignment.
-#es: Endpoints HTTP locales de salud, estado y asignación de credencial.
+"""Local FastAPI HTTP endpoints for health and status.
+#es: Endpoints HTTP locales de salud y estado.
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter
 
 from app.core.config import WEBHOOK_CONCURRENCY, WEBHOOK_URL
 from app import state
 
 router = APIRouter()
-
-
-@router.post("/assign-nfc")
-async def assign_nfc(request: Request):
-    """Queue a credential write for the next tapped card.
-    #es: Encola la escritura de una credencial en la próxima tarjeta detectada.
-    """
-    data = await request.json()
-    credential_id = data.get("credential_id")
-
-    if not credential_id:
-        raise HTTPException(status_code=400, detail="credential_id is required")
-
-    state.pending_assign = {"credential_id": credential_id, "action": "assign"}
-    print(f"Pending assign task: credential_id={credential_id}")
-
-    return {"success": True, "message": f"Waiting for card to assign credential {credential_id}"}
 
 
 @router.get("/")

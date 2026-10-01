@@ -29,7 +29,7 @@ def read_uid_from_card(card) -> tuple[str | None, str]:
         READ_CMD = [0xFF, 0xB0, 0x00, block, 0x04]
         data, sw1, sw2 = conn.transmit(READ_CMD)
         if sw1 == 0x90:
-            credential_id += bytes(data).decode("utf-8", errors="ignore").strip()
+            credential_id += bytes(data).decode("utf-8", errors="ignore").rstrip("\x00").strip()
         else:
             credential_id = None
             break
